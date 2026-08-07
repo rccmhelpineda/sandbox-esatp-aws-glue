@@ -5,6 +5,7 @@ from awsglue.utils import getResolvedOptions
 from pyspark.context import SparkContext
 from awsglue.context import GlueContext
 from awsglue.job import Job
+import os
 
 # import main modules from custom S3 Python library path)
 from SpreadsheetIngester import execute_pipeline    # main pipeline process
@@ -24,7 +25,7 @@ def get_optional_arg(arg_name):
                 return sys.argv[i + 1]
     return ""
 
-required_params = ['input_file_path', 'connection_name', 'target_table', 'error_file_path', 'processed_file_path', 'input_file_name', 'audit_table']
+required_params = ['connection_name', 'target_table', 'folder_location', 'input_file_name', 'audit_table', 'passed_parameter']
 missing_params = [p for p in required_params if f"--{p}" not in sys.argv]
 
 if missing_params:
@@ -32,12 +33,39 @@ if missing_params:
     print(f"### -CRITICAL: Missing required parameters: {missing_str}")
     raise_custom_error("missing_parameters", f"Job failed to start. Missing parameters: {missing_str}")
 
-args = getResolvedOptions(sys.argv, ['JOB_NAME', 'input_file_path', 'connection_name', 'target_table', 'error_file_path', 'processed_file_path', 'input_file_name', 'audit_table'])
+expected_args = [
+    'JOB_NAME', 
+    'passed_parameter', 
+    'input_file_name',
+    'folder_location',
+    'connection_name',
+    'target_table',
+    'audit_table'
+]
+
+args = getResolvedOptions(sys.argv, expected_args)
 args['target_headers'] = get_optional_arg('target_headers')
 args['row_number_label'] = get_optional_arg('row_number_label')
 
 
 # starts here
+s3_start_URI = "s3://"
+input_file_folder = "inbound/"
+success_file_folder = "processed/"
+error_file_folder = "error/"
+
+file_name_passed = os.path.splitext(args.get('input_file_name'))[0]
+file_ext_passed = os.path.splitext(args.get('input_file_name'))[1]
+file_name_param = file_name_passed[:-2] + args.get('passed_parameter') + file_ext_passed
+
+file_path = s3_start_URI + args.get('folder_location') + input_file_folder
+
+args['input_file_path'] = file_path
+
+args['input_file_name'] = file_name_param
+args['target_table'] = args.get('target_table')[:-2] + args.get('passed_parameter')
+
+
 sc = SparkContext()
 glueContext = GlueContext(sc)
 spark = glueContext.spark_session
@@ -46,14 +74,16 @@ job.init(args['JOB_NAME'], args)
 
 try:
     execute_pipeline(args, spark, glueContext) # main glue processes
-    move_s3_file(args.get('input_file_path')+args.get('input_file_name'), args.get('processed_file_path')+args.get('input_file_name')) # success path move
+    success_path = s3_start_URI + args.get('folder_location') + success_file_folder + file_name_param
+    move_s3_file(file_path + file_name_param, success_path) # success path move
     
 except Exception as main_error:
     print(f"### -Job Interrupted/Failed: {str(main_error)}")
     
     # attempt to quarantine the file
     try:
-        move_s3_file(args.get('input_file_path')+args.get('input_file_name'), args.get('error_file_path')+args.get('input_file_name'))
+        error_path = s3_start_URI + args.get('folder_location') + error_file_folder + file_name_param
+        move_s3_file(file_path + file_name_param, error_path)
         
     except Exception as s3_error:
         print("### -CRITICAL: Cascading failure. File quarantine failed after pipeline failure.")
